@@ -1,0 +1,281 @@
+# Check for superuser privileges
+root_check() {
+    l d 'Check root priveleges...'
+    if [ `whoami` != "root" ]; then
+        l f "This script sould be run by root"
+        l i "Please, run it as: sudo $0"
+        exit 1
+    fi
+}
+ 
+# Check OS and set OS variable. 
+os_check() {
+    # If variable is empty - os isn't suitable for deploy
+    l i "Check operation system..."
+    OS=''
+    if [ -f "/etc/issue" ]; then
+        [ -n "$(grep -F 'Debian GNU/Linux 7' /etc/issue)" ] && OS='d7' && l d "Debian 7 detected."
+        [ -n "$(grep -F 'Ubuntu 12.04' /etc/issue)" ] && OS='u1204' && l d "Ubuntu 12.04 detected."
+    fi
+    [ -z "$OS" ] && l f "Current operation system is not suitable for deploy!" && exit 2
+}
+ 
+# Check and generate locale
+locale_check_gen() {
+    l i "Checking locales..."
+    localedef "$LOC" -i `echo "$LOC" | cut -d "." -f 1` -f`echo "$LOC" | cut -d "." -f 2`
+    if [ -z "$(locale 2>&1 | grep "$LOC")" ]; then
+        l w "Locale is not $LOC!"
+        l i "All next operations will be cancelled."
+        locale-gen "$LOC"
+        echo "LANG=$LOC" > /etc/default/locale
+        l i "Default locale was changed to $LOC. You should logout and login again to changes has taken."
+        exit 8
+    fi
+}
+ 
+# OS update and upgrade
+os_update() {
+    [ -z "$OS" ] && os_check
+    l i "Updating package indexes..."
+    if [ "$LOGLEVEL" = "debug" ]; then
+        if apt-get -y update; then
+            l i "Package indexes is updated."
+            l i "Upgrade packages..."
+            if apt-get -y upgrade; then
+                l i "Packages is upgraded."
+            else
+                l w "Can't upgrade packages!"
+            fi
+        else
+            l w "Can't update package indexes!"
+        fi
+    else
+        l i "Update apt package indexes..."
+        if apt-get update > /dev/null; then
+            echo
+            l i "Package indexes is updated."
+            l i "Upgrade packages..."
+            if apt-get -y upgrade > /dev/null; then
+                echo
+                l i "Packages is upgraded."
+            else
+                l w "Can't upgrade packages!"
+            fi
+        else
+            l w "Can't update package indexes!"
+        fi
+    fi
+    if [ -z `pkg_inst_check sudo *` ]; then
+        pkg_inst sudo
+    else
+        l d 'sudo package is already installed...'
+    fi
+}
+ 
+# OS full update
+os_full_update() {
+    [ -z "$OS" ] && os_check
+    os_update
+    if [ "$OS" = "u1204" ]; then
+        if [ -z "$(pkg_inst_check python-software-properties)" ]; then
+            l i "Install some appending packages for Ubuntu..."
+            pkg_lst_inst 'make python-software-properties'
+        fi
+        l i "Checking repository for php5.4..."
+        if [ -z "$(ls -1 /etc/apt/sources.list.d | grep 'ondrej-php5')" ]; then
+            l i "Repository with php5.4 is not found..."
+            if add-apt-repository -y ppa:ondrej/php5 > /dev/null; then
+                l i "Repository successfully added..."
+                os_update
+            else
+                l f "Can't add perository for php5.4..."
+                l i "All next operations will be cancelled."
+                exit 7
+            fi
+        fi
+    fi
+}
+ 
+# Check if package is installed
+pkg_inst_check() {
+    # First parameter is package name
+    # The second is version
+    # Return version, if package is installed
+    if [ -n "$1" ]; then
+        pname=`echo $1 | sed 's/+/\\\+/g'`
+        ver=`dpkg -l | awk '$1~/^i.$/ && $2~/^'"$pname"'$/ { print $3 }'`
+        if [ -n "$ver" ]; then
+            [ -n "$2" ] && ver=`pkg_ver_analyse "$ver" "$2" "$1"`
+            [ -n "$ver" ] && echo "$ver"
+        fi
+    fi
+}
+ 
+# Check package is available
+pkg_avail_check() {
+    # First parameter is package name
+    # The second is version
+    # Return version, if package is available
+    if [ -n "$1" ]; then
+        ver=`apt-cache show "$1" | awk '$1~/^Version:$/ { print $2 }' | head -n 1`
+        if [ -n "$ver" ]; then
+            [ -n "$2" ] && ver=`pkg_ver_analyse "$ver" "$2" "$1"`
+            [ -n "$ver" ] && echo "$ver"
+        fi
+    fi
+}
+ 
+# Analyse of package version.
+pkg_ver_analyse() {
+    # First parameter is current version
+    # Second parameter is minimal needed version
+    # Third parameter is package name (optional)
+    # Return version number if it fits
+    if [ -n "$2" ]; then
+        v1=`echo "$1" | sed 's/^[0-9]://;s/[-\+].*$//;s/[a-zA-Z].*$//;s/\.$//'`
+        v2=`echo "$2" | sed 's/^[0-9]://;s/[-\+].*$//;s/[a-zA-Z].*$//;s/\.$//'`
+        a1=`echo "$v1" | cut -d "." -f1`
+        b1=`echo "$v1" | cut -d "." -f2`
+        c1=`echo "$v1" | cut -d "." -f3`
+        a2=`echo "$v2" | cut -d "." -f1`
+        b2=`echo "$v2" | cut -d "." -f2`
+        c2=`echo "$v2" | cut -d "." -f3`
+        [ -z "$b1" ] && b1="0"
+        [ -z "$c1" ] && c1="0"
+        [ -z "$b2" ] && b2="0"
+        [ -z "$c2" ] && c2="0"
+        res=`echo "$a1 $b1 $c1 $a2 $b2 $c2" | awk '{ res="-"; 
+            if ( $1 > $4 ) { 
+                print res 
+            } else {
+                if ( $1 < $4 ) {
+                    res=""
+                } else {
+                    if ( $2 > $5 ) {
+                        print res
+                    } else {
+                        if ( $2 < $5 ) {
+                            res=""
+                        } else {
+                            if ( $3 > $6 ) {
+                                print res
+                            } else {
+                                if ( $3 < $6 ) {
+                                    res=""
+                                } else {
+                                    print res
+                                }
+                            };
+                        };
+                    };
+                };
+            };
+        }'`
+        if [ -n "$res" ]; then
+            echo "$1"
+        fi
+    fi
+}
+ 
+# Install package
+pkg_inst() {
+    # First parameter is package name
+    # Second parameter is package version
+    l i "Installing package $1 $2..."
+    if [ -n "$1" ]; then
+        l d "Check if package $1 is already installed..."
+        ver=`pkg_inst_check "$1"`
+        if [ -n "$ver" ]; then
+            l d "The package $1 is already installed..."
+            if [ -n "$2" ]; then
+                ver=`pkg_ver_analyse "$ver" "$2"`
+                if [ -n "$ver" ]; then
+                    l i "Package $1 $ver is already installed..."
+                else
+                    l w "Package $1 version $ver is not suitable."
+                    ver=`pkg_avail_check "$1" "$2"`
+                    if [ -n "$ver" ]; then
+                        l i "Reinstalling package $1..."
+                        if [ "$LOGLEVEL" = 'debug' ]; then
+                            echo "$DIV"
+                            if apt-get $APTPARAMS -y upgrade $1; then
+                                echo "$DIV"
+                                l i "The package $1 is reinstalled..."
+                            else
+                                echo "$DIV"
+                                l w "Can't reinstall package $1"
+                            fi
+                        else
+                            if apt-get $APTPARAMS -y upgrade $1 > /dev/null; then   
+                                l i "The package $1 is reinstalled..."
+                            else
+                                l w "Can't reinstall package $1"
+                            fi
+                        fi
+                    fi
+                fi
+            else
+                l i "Package $1 $ver is already installed..."
+            fi
+        else
+            l d "Package $1 is not installed. Check availability for installation..."
+            ver=`pkg_avail_check "$1" "$2"`
+            if [ -n "$ver" ]; then
+                l d "Package $1 is available to installation..."
+                if [ "$1" = "mysql-server" ]; then
+                    l d "Setting default password for mysql-server..."
+                    depname=`apt-cache show mysql-server | awk '$1~/^Depends:$/ { print $2 }'`
+                    echo "$depname mysql-server/root_password password $MYSQLPASS" | debconf-set-selections
+                    echo "$depname mysql-server/root_password_again password $MYSQLPASS" | debconf-set-selections
+                fi
+                if [ "$LOGLEVEL" = 'debug' ]; then
+                    echo "$DIV"
+                    if apt-get $APTPARAMS -y install $1; then
+                        echo "$DIV"
+                        [ -n `pkg_inst_check $1 $2` ] && l i "The package $2 is installed..." || l w "Shomething wrong with package $1 installation..."
+                    else
+                        echo "$DIV"
+                        l w "Can't install package $1"
+                    fi
+                else
+                    if apt-get $APTPARAMS -y install $1 > /dev/null; then   
+                        l i "The package $1 is installed..."
+                    else
+                        l w "Can't install package $1"
+                    fi
+                fi
+            else
+                [ -n "$2" ] && l w "Package $1 $2 is not available to install..." || l w "Package $1 is not available to install..."
+            fi
+        fi
+    fi
+}
+ 
+# Install list of packages
+pkg_lst_inst() {
+    # First parameter is list of packages <pkgname>:[version]:[]
+    if [ -n "$1" ]; then
+        ver=''
+        for pkg in $1; do
+            if [ -n "$(echo "$pkg" | grep -F ':')" ]; then
+                pn=`echo "$pkg" | cut -d ":" -f1`
+                pv=`echo "$pkg" | cut -d ":" -f2`
+                pkg_inst "$pn" "$pv"
+                l d "Check than package $pn $pv is correctly installed..."
+                ver=`pkg_inst_check $pn $pv`                
+            else
+                pkg_inst "$pkg"
+                l d "Check than package $pkg is correctly installed..."
+                ver=`pkg_inst_check $pkg`                
+            fi
+            if [ -n "$ver" ]; then
+                l d "Package $pkg installation is checked."
+            else
+                l f "Package $pkg is not installed properly!"
+                l f "All next operations will be canceled!"
+                exit 3
+            fi
+        done
+    fi
+}
